@@ -10,7 +10,7 @@
     "lint": "eslint",
     "electron": "wait-on tcp:3000 && electron .",
     "dev:electron": "concurrently -k \"npm run dev\" \"npm run electron\"",
-    "build:electron": "npm run build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && electron-builder build"
+    "build:electron": "npm run build && node -e \"const fs=require('fs');fs.cpSync('.next/static','.next/standalone/.next/static',{recursive:true});fs.cpSync('public','.next/standalone/public',{recursive:true})\" && electron-builder build"
   },
   "build": {
     "appId": "com.edichoix.ediprospect",
