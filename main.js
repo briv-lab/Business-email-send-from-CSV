@@ -1,20 +1,20 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 
 let mainWindow;
 
-const isDev = process.env.NODE_ENV !== 'production';
-
+/**
+ * Polls localhost until the Next.js server responds.
+ * Retries every 200ms, up to maxRetries times.
+ */
 function waitForServer(url, maxRetries = 50) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     const check = () => {
       attempts++;
-      http.get(url, (res) => {
-        resolve();
-      }).on('error', () => {
+      http.get(url, () => resolve()).on('error', () => {
         if (attempts >= maxRetries) {
           reject(new Error(`Server not ready after ${maxRetries} attempts`));
         } else {
@@ -37,49 +37,48 @@ function createWindow() {
     },
   });
 
-  if (isDev) {
+  // app.isPackaged is the ONLY reliable way to detect production in Electron.
+  // process.env.NODE_ENV is NOT set in packaged apps.
+  if (!app.isPackaged) {
+    // DEV: Next.js dev server is already running via 'npm run dev'
     mainWindow.loadURL('http://localhost:3000');
   } else {
+    // PRODUCTION: Start the standalone Next.js server in-process.
+    // With asar:false, all files are plain on disk next to main.js.
     const serverPath = path.join(__dirname, '.next', 'standalone', 'server.js');
-    const exists = fs.existsSync(serverPath);
-    
-    console.log('[EdiProspect] __dirname:', __dirname);
-    console.log('[EdiProspect] serverPath:', serverPath);
-    console.log('[EdiProspect] server exists:', exists);
 
-    if (!exists) {
-      dialog.showErrorBox('EdiProspect Error', `server.js not found at:\n${serverPath}`);
+    if (!fs.existsSync(serverPath)) {
+      console.error('[EdiProspect] server.js not found at', serverPath);
       return;
     }
 
     const port = 3000;
     const userDataPath = app.getPath('userData');
 
+    // Set env vars BEFORE requiring the server
     process.env.PORT = port.toString();
     process.env.APPDATA_DIR = userDataPath;
+    // NODE_ENV is set by server.js itself (process.env.NODE_ENV = 'production')
 
-    // Require the server — server.js sets process.env.NODE_ENV and process.chdir itself
     try {
       require(serverPath);
-      console.log('[EdiProspect] require(server.js) succeeded');
+      console.log('[EdiProspect] Next.js server starting...');
     } catch (err) {
-      console.error('[EdiProspect] require(server.js) FAILED:', err.message);
-      console.error(err.stack);
-      dialog.showErrorBox('Server Error', `Failed to start server:\n${err.message}\n\n${err.stack}`);
+      console.error('[EdiProspect] Failed to start server:', err);
       return;
     }
 
+    // Poll until the server is ready, then load the UI
     const serverUrl = `http://localhost:${port}`;
     waitForServer(serverUrl)
       .then(() => {
-        console.log('[EdiProspect] Server ready, loading UI...');
+        console.log('[EdiProspect] Server ready!');
         if (mainWindow) {
           mainWindow.loadURL(serverUrl);
         }
       })
       .catch((err) => {
         console.error('[EdiProspect] Server timeout:', err.message);
-        dialog.showErrorBox('Server Timeout', `Server failed to start in time:\n${err.message}`);
       });
   }
 
