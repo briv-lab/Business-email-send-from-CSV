@@ -1,0 +1,59 @@
+{
+  "name": "ediprospect",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "electron": "wait-on tcp:3000 && electron .",
+    "dev:electron": "concurrently -k \"npm run dev\" \"npm run electron\"",
+    "build:electron": "npm run build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && electron-builder build"
+  },
+  "build": {
+    "appId": "com.edichoix.ediprospect",
+    "productName": "EdiProspect",
+    "directories": {
+      "output": "dist"
+    },
+    "asar": false,
+    "files": [
+      "main.js",
+      "package.json",
+      ".next/standalone/**/*"
+    ],
+    "mac": {
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "lucide-react": "^0.577.0",
+    "next": "16.1.6",
+    "nodemailer": "^8.0.1",
+    "papaparse": "^5.5.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-quill-new": "^3.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/nodemailer": "^7.0.11",
+    "@types/papaparse": "^5.5.2",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^40.7.0",
+    "electron-builder": "^26.8.1",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "typescript": "^5",
+    "wait-on": "^9.0.4"
+  }
+}
