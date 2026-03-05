@@ -1,9 +1,127 @@
 import { NextResponse } from 'next/server';
 import nodemailer from 'nodemailer';
+import tls from 'tls';
 
 import Papa from 'papaparse';
 import fs from 'fs';
 import path from 'path';
+
+/**
+ * Minimal IMAP APPEND using Node.js built-in tls module.
+ * No external imap library needed — avoids Electron/Next.js bundling issues.
+ */
+function appendToSentFolder(
+  imapHost: string,
+  imapUser: string,
+  imapPass: string,
+  rawEmail: string
+): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      console.warn('IMAP append timed out');
+      try { socket.destroy(); } catch { /* ignore */ }
+      resolve();
+    }, 15000);
+
+    const socket = tls.connect(993, imapHost, { rejectUnauthorized: false }, () => {
+      let buffer = '';
+      let step = 0;
+      let tagCounter = 1;
+      const sentFolders = ['Sent', 'INBOX.Sent', 'Sent Messages'];
+      let folderIndex = 0;
+
+      const sendCommand = (cmd: string) => {
+        const tag = `A${tagCounter++}`;
+        socket.write(`${tag} ${cmd}\r\n`);
+        return tag;
+      };
+
+      const tryAppendNextFolder = () => {
+        if (folderIndex >= sentFolders.length) {
+          // No folder worked, logout anyway
+          console.warn('Could not find Sent folder, skipping IMAP append');
+          step = 99;
+          sendCommand('LOGOUT');
+          return;
+        }
+        const folder = sentFolders[folderIndex];
+        const emailBytes = Buffer.byteLength(rawEmail, 'utf-8');
+        step = 3; // waiting for append literal ready
+        const tag = `A${tagCounter++}`;
+        socket.write(`${tag} APPEND "${folder}" (\\Seen) {${emailBytes}}\r\n`);
+      };
+
+      socket.on('data', (data: Buffer) => {
+        buffer += data.toString();
+        const lines = buffer.split('\r\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (step === 0 && line.startsWith('* OK')) {
+            // Server greeting received, login
+            step = 1;
+            sendCommand(`LOGIN "${imapUser.replace(/"/g, '\\"')}" "${imapPass.replace(/"/g, '\\"')}"`);
+          } else if (step === 1 && /^A\d+ OK/i.test(line)) {
+            // Login successful, try first Sent folder
+            step = 2;
+            folderIndex = 0;
+            tryAppendNextFolder();
+          } else if (step === 1 && /^A\d+ (NO|BAD)/i.test(line)) {
+            // Login failed
+            console.error('IMAP login failed:', line);
+            clearTimeout(timeout);
+            socket.destroy();
+            resolve();
+          } else if (step === 3 && line.startsWith('+')) {
+            // Server ready for literal data
+            socket.write(rawEmail + '\r\n');
+            step = 4; // waiting for append result
+          } else if (step === 4 && /^A\d+ OK/i.test(line)) {
+            // Append successful, logout
+            step = 99;
+            sendCommand('LOGOUT');
+          } else if (step === 4 && /^A\d+ (NO|BAD)/i.test(line)) {
+            // This folder didn't work, try next
+            folderIndex++;
+            tryAppendNextFolder();
+          } else if (step === 99 && /^A\d+ OK|^\* BYE/i.test(line)) {
+            clearTimeout(timeout);
+            socket.destroy();
+            resolve();
+          }
+        }
+      });
+
+      socket.on('error', (err: Error) => {
+        console.error('IMAP socket error:', err.message);
+        clearTimeout(timeout);
+        resolve();
+      });
+
+      socket.on('close', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+
+    socket.on('error', (err: Error) => {
+      console.error('IMAP TLS connection error:', err.message);
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
+/**
+ * Build a raw RFC 2822 email string from the message options,
+ * using nodemailer's internal MailComposer.
+ */
+async function buildRawEmail(mailOptions: Record<string, any>): Promise<string> {
+  const MailComposer = (await import('nodemailer/lib/mail-composer')).default;
+  const mail = new MailComposer(mailOptions);
+  const message = await mail.compile().build();
+  return message.toString();
+}
 
 export async function POST(request: Request) {
   try {
@@ -55,15 +173,26 @@ export async function POST(request: Request) {
         }
       }
 
+      const mailOptions = {
+        from: `"${name}" <${user}>`,
+        to: recipient.email,
+        subject: personalizedSubject,
+        html: personalizedBody,
+        attachments: parsedAttachments
+      };
+
       try {
-        await transporter.sendMail({
-          from: `"${name}" <${user}>`,
-          to: recipient.email,
-          subject: personalizedSubject,
-          html: personalizedBody,
-          attachments: parsedAttachments
-        });
+        await transporter.sendMail(mailOptions);
         results.push({ email: recipient.email, status: 'success' });
+
+        // Copy email to Sent folder via IMAP
+        try {
+          const rawEmail = await buildRawEmail(mailOptions);
+          await appendToSentFolder(host, user!, pass!, rawEmail);
+        } catch (imapErr: any) {
+          console.error(`Failed to copy email to Sent folder for ${recipient.email}:`, imapErr.message);
+          // Don't fail the send result if IMAP copy fails
+        }
       } catch (err: any) {
         results.push({ email: recipient.email, status: 'error', error: err.message });
       }

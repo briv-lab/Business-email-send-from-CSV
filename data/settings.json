@@ -1,0 +1,11 @@
+{
+  "theme": "system",
+  "smtpConfig": {
+    "host": "",
+    "port": 465,
+    "user": "",
+    "pass": ""
+  },
+  "emailSignature": "",
+  "senderName": "Briac de Edichoix"
+}

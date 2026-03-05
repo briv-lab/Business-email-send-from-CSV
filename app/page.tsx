@@ -56,19 +56,29 @@ export default function App() {
 
   useEffect(() => {
     fetchFiles();
-    const savedSignature = localStorage.getItem('emailSignature');
-    if (savedSignature) {
-      setSignature(savedSignature);
-    }
-    const savedTheme = localStorage.getItem('theme') as any;
-    if (savedTheme) {
-      setTheme(savedTheme);
-    }
-    const savedSmtp = localStorage.getItem('smtpConfig');
-    if (savedSmtp) {
-      try { setSmtpConfig(JSON.parse(savedSmtp)); } catch(e) {}
-    }
+    fetchSettings();
   }, []);
+
+  const fetchSettings = async () => {
+    try {
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      if (data.emailSignature) setSignature(data.emailSignature);
+      if (data.theme) setTheme(data.theme);
+      if (data.smtpConfig) setSmtpConfig(data.smtpConfig);
+      if (data.senderName) setSenderName(data.senderName);
+    } catch(e) { console.error('Failed to load settings', e); }
+  };
+
+  const saveSettings = async (newSettings: any) => {
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSettings)
+      });
+    } catch(e) { console.error('Failed to save settings', e); }
+  };
 
   useEffect(() => {
     if (activeFilename) {
@@ -87,20 +97,17 @@ export default function App() {
   };
 
   useEffect(() => {
-    localStorage.setItem('theme', theme);
+    // Only save theme if it's explicitly explicitly changed by user to prevent empty initial saves
     document.documentElement.setAttribute('data-theme', theme);
+    saveSettings({ theme });
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem('smtpConfig', JSON.stringify(smtpConfig));
-  }, [smtpConfig]);
-
-  useEffect(() => {
     const delayDebounce = setTimeout(() => {
-      localStorage.setItem('emailSignature', signature);
-    }, 500);
+      saveSettings({ smtpConfig, emailSignature: signature, senderName });
+    }, 1000);
     return () => clearTimeout(delayDebounce);
-  }, [signature]);
+  }, [smtpConfig, signature, senderName]);
 
   const fetchProspects = async () => {
     setIsLoading(true);
@@ -153,12 +160,47 @@ export default function App() {
     setRows(newRows);
   };
 
+  const [customPrompt, setCustomPrompt] = useState<{
+    isOpen: boolean;
+    title: string;
+    placeholder: string;
+    onConfirm: (val: string) => void;
+  }>({
+    isOpen: false,
+    title: '',
+    placeholder: '',
+    onConfirm: () => {}
+  });
+
+  const [promptValue, setPromptValue] = useState('');
+
+  const openPrompt = (title: string, placeholder: string, onConfirm: (val: string) => void) => {
+    setPromptValue('');
+    setCustomPrompt({ isOpen: true, title, placeholder, onConfirm });
+  };
+
+  const closePrompt = () => {
+    setCustomPrompt({ ...customPrompt, isOpen: false });
+  };
+
+  const handlePromptSubmit = () => {
+    if (promptValue.trim()) {
+      customPrompt.onConfirm(promptValue.trim());
+    }
+    closePrompt();
+  };
+
   const addColumn = () => {
-    const name = prompt("Nom de la nouvelle variable (ex: entreprise) :");
-    if (!name || headers.includes(name)) return;
-    setHeaders([...headers, name]);
-    const newRows = rows.map(r => ({ ...r, [name]: "" }));
-    setRows(newRows);
+    openPrompt(
+      "Ajouter une colonne",
+      "Nom de la nouvelle variable (ex: entreprise)",
+      (name) => {
+        if (!name || headers.includes(name)) return;
+        setHeaders([...headers, name]);
+        const newRows = rows.map(r => ({ ...r, [name]: "" }));
+        setRows(newRows);
+      }
+    );
   };
 
   const removeColumn = (colName: string) => {
@@ -180,23 +222,30 @@ export default function App() {
   const handleFileChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     if (val === 'CREATE_NEW') {
-      const newName = prompt("Nom du nouveau fichier (sans l'extension) :");
-      if (newName) {
-        try {
-          const res = await fetch('/api/files', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'create', newFilename: newName })
-          });
-          const data = await res.json();
-          if (data.success) {
-            await fetchFiles();
-            setActiveFilename(data.filename);
-          } else {
-            alert(data.error || "Erreur lors de la création");
+      openPrompt(
+        "Nouveau fichier",
+        "Nom du nouveau fichier (sans l'extension)",
+        async (newName) => {
+          if (newName) {
+            try {
+              const res = await fetch('/api/files', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'create', newFilename: newName })
+              });
+              const data = await res.json();
+              if (data.success) {
+                await fetchFiles();
+                setActiveFilename(data.filename);
+              } else {
+                alert(data.error || "Erreur lors de la création");
+              }
+            } catch(e) { alert("Erreur serveur"); }
           }
-        } catch(e) { alert("Erreur serveur"); }
-      }
+        }
+      );
+      // Reset select to previous value until new file is created
+      e.target.value = activeFilename;
       return;
     }
     setActiveFilename(val);
@@ -343,6 +392,32 @@ export default function App() {
                 <input type="password" value={smtpConfig.pass} onChange={e => setSmtpConfig({...smtpConfig, pass: e.target.value})} placeholder="********" />
               </div>
               <button className="btn-primary" onClick={() => setShowSmtpModal(false)} style={{ marginTop: '0.5rem' }}>Sauvegarder</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CUSTOM PROMPT MODAL */}
+      {customPrompt.isOpen && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.6)', zIndex: 110, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div className="card" style={{ width: '400px', maxWidth: '90%' }}>
+            <div className="card-header">
+              <h2 style={{ fontSize: '1.1rem' }}>{customPrompt.title}</h2>
+              <button className="btn-icon-only btn-secondary" onClick={closePrompt}><X className="w-4 h-4" /></button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <input 
+                type="text" 
+                autoFocus
+                value={promptValue} 
+                onChange={e => setPromptValue(e.target.value)} 
+                placeholder={customPrompt.placeholder} 
+                onKeyDown={e => { if (e.key === 'Enter') handlePromptSubmit(); else if (e.key === 'Escape') closePrompt(); }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.5rem' }}>
+                <button className="btn-secondary" onClick={closePrompt}>Annuler</button>
+                <button className="btn-primary" onClick={handlePromptSubmit}>Confirmer</button>
+              </div>
             </div>
           </div>
         </div>

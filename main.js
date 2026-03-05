@@ -32,8 +32,8 @@ function createWindow() {
     height: 800,
     title: 'EdiProspect',
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
     },
   });
 
@@ -52,34 +52,47 @@ function createWindow() {
       return;
     }
 
-    const port = 3000;
     const userDataPath = app.getPath('userData');
 
-    // Set env vars BEFORE requiring the server
-    process.env.PORT = port.toString();
-    process.env.APPDATA_DIR = userDataPath;
-    // NODE_ENV is set by server.js itself (process.env.NODE_ENV = 'production')
-
-    try {
-      require(serverPath);
-      console.log('[EdiProspect] Next.js server starting...');
-    } catch (err) {
-      console.error('[EdiProspect] Failed to start server:', err);
-      return;
-    }
-
-    // Poll until the server is ready, then load the UI
-    const serverUrl = `http://localhost:${port}`;
-    waitForServer(serverUrl)
-      .then(() => {
-        console.log('[EdiProspect] Server ready!');
-        if (mainWindow) {
-          mainWindow.loadURL(serverUrl);
-        }
-      })
-      .catch((err) => {
-        console.error('[EdiProspect] Server timeout:', err.message);
+    // Helper to find a free port
+    const getFreePort = () => new Promise((resolve, reject) => {
+      const srv = require('net').createServer();
+      srv.listen(0, () => {
+        const port = srv.address().port;
+        srv.close(() => resolve(port));
       });
+      srv.on('error', reject);
+    });
+
+    getFreePort().then((port) => {
+      // Set env vars BEFORE requiring the server
+      process.env.PORT = port.toString();
+      process.env.APPDATA_DIR = userDataPath;
+      // NODE_ENV is set by server.js itself (process.env.NODE_ENV = 'production')
+
+      try {
+        require(serverPath);
+        console.log(`[EdiProspect] Next.js server starting on port ${port}...`);
+      } catch (err) {
+        console.error('[EdiProspect] Failed to start server:', err);
+        return;
+      }
+
+      // Poll until the server is ready, then load the UI
+      const serverUrl = `http://localhost:${port}`;
+      waitForServer(serverUrl)
+        .then(() => {
+          console.log('[EdiProspect] Server ready!');
+          if (mainWindow) {
+            mainWindow.loadURL(serverUrl);
+          }
+        })
+        .catch((err) => {
+          console.error('[EdiProspect] Server timeout:', err.message);
+        });
+    }).catch(err => {
+      console.error('[EdiProspect] Could not find a free port:', err);
+    });
   }
 
   mainWindow.on('closed', () => {
