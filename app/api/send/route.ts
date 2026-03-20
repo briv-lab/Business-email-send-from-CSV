@@ -34,8 +34,151 @@ type SendResult = {
   error?: string;
 };
 
+type MailAttachment = NonNullable<SendMailOptions['attachments']>[number];
+
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unknown error';
+}
+
+function extensionFromMimeType(contentType: string) {
+  switch (contentType.toLowerCase()) {
+    case 'image/jpeg':
+      return 'jpg';
+    case 'image/png':
+      return 'png';
+    case 'image/gif':
+      return 'gif';
+    case 'image/webp':
+      return 'webp';
+    case 'image/svg+xml':
+      return 'svg';
+    default:
+      return 'img';
+  }
+}
+
+function contentTypeFromFilename(filename: string) {
+  switch (path.extname(filename).toLowerCase()) {
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.png':
+      return 'image/png';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.svg':
+      return 'image/svg+xml';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function resolveImagePath(src: string) {
+  const normalizedSrc = src.split('#')[0]?.split('?')[0]?.trim();
+  if (!normalizedSrc) {
+    return null;
+  }
+
+  const candidates = new Set<string>();
+  const currentDir = process.cwd();
+  const logoFilename = 'logo-edichoix-slogan.png';
+
+  if (normalizedSrc.startsWith('file://')) {
+    try {
+      candidates.add(decodeURIComponent(new URL(normalizedSrc).pathname));
+    } catch {
+      return null;
+    }
+  } else if (path.isAbsolute(normalizedSrc)) {
+    candidates.add(normalizedSrc);
+    candidates.add(path.join(currentDir, normalizedSrc.replace(/^\/+/, '')));
+    candidates.add(path.join(currentDir, 'public', normalizedSrc.replace(/^\/+/, '')));
+  } else {
+    candidates.add(path.resolve(currentDir, normalizedSrc));
+    candidates.add(path.resolve(currentDir, 'public', normalizedSrc));
+  }
+
+  if (
+    normalizedSrc === logoFilename
+    || normalizedSrc.endsWith(`/${logoFilename}`)
+    || normalizedSrc === '/logo-edichoix-slogan.png'
+  ) {
+    candidates.add(path.join(currentDir, logoFilename));
+    candidates.add(path.join(currentDir, 'public', logoFilename));
+  }
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function inlineHtmlImages(html: string) {
+  const inlineAttachments: MailAttachment[] = [];
+  const inlineSourceToCid = new Map<string, string>();
+  let imageCounter = 0;
+
+  const nextCid = () => `inline-image-${imageCounter += 1}@edichoix.local`;
+
+  const nextHtml = html.replace(
+    /(<img\b[^>]*?\bsrc=)(["'])(.*?)\2/gi,
+    (fullMatch, prefix: string, quote: string, rawSrc: string) => {
+      const src = rawSrc.trim();
+      if (!src || /^cid:/i.test(src) || /^https?:\/\//i.test(src)) {
+        return fullMatch;
+      }
+
+      const existingCid = inlineSourceToCid.get(src);
+      if (existingCid) {
+        return `${prefix}${quote}cid:${existingCid}${quote}`;
+      }
+
+      if (/^data:image\//i.test(src)) {
+        const dataMatch = src.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i);
+        if (!dataMatch) {
+          return fullMatch;
+        }
+
+        const [, contentType, base64Content] = dataMatch;
+        const cid = nextCid();
+        inlineAttachments.push({
+          filename: `inline-${imageCounter}.${extensionFromMimeType(contentType)}`,
+          content: Buffer.from(base64Content.replace(/\s+/g, ''), 'base64'),
+          contentType,
+          cid,
+          contentDisposition: 'inline',
+        });
+        inlineSourceToCid.set(src, cid);
+        return `${prefix}${quote}cid:${cid}${quote}`;
+      }
+
+      const resolvedPath = resolveImagePath(src);
+      if (!resolvedPath) {
+        return fullMatch;
+      }
+
+      const cid = nextCid();
+      inlineAttachments.push({
+        filename: path.basename(resolvedPath),
+        path: resolvedPath,
+        contentType: contentTypeFromFilename(resolvedPath),
+        cid,
+        contentDisposition: 'inline',
+      });
+      inlineSourceToCid.set(src, cid);
+      return `${prefix}${quote}cid:${cid}${quote}`;
+    },
+  );
+
+  return {
+    html: nextHtml,
+    attachments: inlineAttachments,
+  };
 }
 
 function appendToSentFolder(
@@ -206,12 +349,16 @@ export async function POST(request: Request) {
         }
       }
 
+      const { html: htmlWithInlineImages, attachments: inlineAttachments } = inlineHtmlImages(
+        personalizedBody,
+      );
+
       const mailOptions: SendMailOptions = {
         from: `"${name}" <${user}>`,
         to: recipient.email,
         subject: personalizedSubject,
-        html: personalizedBody,
-        attachments: parsedAttachments,
+        html: htmlWithInlineImages,
+        attachments: [...parsedAttachments, ...inlineAttachments],
       };
 
       try {

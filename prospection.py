@@ -3,6 +3,8 @@ import csv
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,6 +15,7 @@ SMTP_USER = os.getenv("SMTP_USER")
 EMAIL_PASSWORD = os.getenv("SMTP_PASS")
 
 NAME = "Briac"
+LOGO_PATH = Path(__file__).resolve().parent / "logo-edichoix-slogan.png"
 
 def send_email(server, to: str, subject: str, body: str, html: bool = False):
     msg = MIMEMultipart("alternative")
@@ -20,6 +23,14 @@ def send_email(server, to: str, subject: str, body: str, html: bool = False):
     msg["To"] = to
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "html" if html else "plain"))
+
+    if html and LOGO_PATH.exists():
+        with LOGO_PATH.open("rb") as logo_file:
+            logo = MIMEImage(logo_file.read(), _subtype="png")
+            logo.add_header("Content-ID", "<edichoix-logo>")
+            logo.add_header("Content-Disposition", "inline", filename=LOGO_PATH.name)
+            msg.attach(logo)
+
     server.sendmail(SMTP_USER, to, msg.as_string())
     print(f"✓ Envoyé à {to}")
 
@@ -41,7 +52,7 @@ N’hésitez pas à me répondre pour en discuter ou convenir d’un rendez-vous
 <p>Cordialement,<br>
 Briac de Edichoix</p>
 <p>
-    <img src='' alt='Logo Edichoix' style='width:37%; max-width:200px;'>
+    <img src='cid:edichoix-logo' alt='Logo Edichoix' style='width:37%; max-width:200px;'>
 </p>
 """
 
