@@ -2,9 +2,15 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 
+type SettingsPayload = Record<string, unknown>;
+
 function getSettingsPath() {
   const basePath = process.env.APPDATA_DIR || process.cwd();
   return path.join(basePath, 'data', 'settings.json');
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Unknown error';
 }
 
 export async function GET() {
@@ -15,7 +21,7 @@ export async function GET() {
       return NextResponse.json(JSON.parse(data));
     }
     return NextResponse.json({});
-  } catch (error: any) {
+  } catch (error) {
     console.error('Failed to read settings:', error);
     return NextResponse.json({}, { status: 500 });
   }
@@ -23,7 +29,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const payload = await request.json();
+    const payload = await request.json() as SettingsPayload;
     const settingsPath = getSettingsPath();
     const dir = path.dirname(settingsPath);
     
@@ -31,11 +37,11 @@ export async function POST(request: Request) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    let currentSettings = {};
+    let currentSettings: SettingsPayload = {};
     if (fs.existsSync(settingsPath)) {
       try {
-        currentSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      } catch (e) {
+        currentSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as SettingsPayload;
+      } catch {
         // ignore JSON parse errors of old settings
       }
     }
@@ -44,8 +50,8 @@ export async function POST(request: Request) {
     fs.writeFileSync(settingsPath, JSON.stringify(newSettings, null, 2), 'utf-8');
 
     return NextResponse.json({ success: true, settings: newSettings });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Failed to save settings:', error);
-    return NextResponse.json({ error: 'Failed to save settings' }, { status: 500 });
+    return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }

@@ -1,341 +1,549 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
-import dynamic from 'next/dynamic';
-import { Mail, Users, Send, Settings, Plus, Trash2, Save, CheckCircle2, AlertCircle, Paperclip, X } from 'lucide-react';
-import 'react-quill-new/dist/quill.snow.css';
+import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent } from 'react';
+import type QuillType from 'quill';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Mail,
+  Paperclip,
+  Plus,
+  Save,
+  Send,
+  Settings,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react';
 
-const WrappedQuill = dynamic(
-  async () => {
-    const { default: RQ } = await import('react-quill-new');
-    return function ForwardedQuill(props: any) {
-      return <RQ ref={props.forwardedRef} {...props} />;
-    };
-  },
-  { ssr: false }
-);
+import RichTextEditor from '@/components/rich-text-editor';
+
+type Theme = 'light' | 'dark' | 'system';
+type ActiveEditor = 'subject' | 'body' | 'signature';
+type ProspectRow = Record<string, string>;
+type Attachment = {
+  name: string;
+  content: string;
+  type: string;
+  size: number;
+};
+type SendResult = {
+  email: string;
+  status: 'success' | 'error';
+  error?: string;
+};
+type SmtpConfig = {
+  host: string;
+  port: number;
+  user: string;
+  pass: string;
+};
+type SettingsPayload = Partial<{
+  theme: Theme;
+  emailSignature: string;
+  smtpConfig: SmtpConfig;
+  senderName: string;
+}>;
+type PromptState = {
+  isOpen: boolean;
+  title: string;
+  placeholder: string;
+  onConfirm: (value: string) => void | Promise<void>;
+};
+
+function detectPlatform() {
+  if (typeof navigator === 'undefined') {
+    return 'other';
+  }
+
+  const platform = navigator.userAgent.toLowerCase();
+  if (platform.includes('windows')) {
+    return 'windows';
+  }
+
+  if (platform.includes('mac')) {
+    return 'mac';
+  }
+
+  return 'other';
+}
+
+function insertTextIntoEditor(editor: QuillType | null, text: string) {
+  if (!editor) {
+    return false;
+  }
+
+  editor.focus({ preventScroll: true });
+  const selection = editor.getSelection() ?? {
+    index: Math.max(editor.getLength() - 1, 0),
+    length: 0,
+  };
+
+  if (selection.length > 0) {
+    editor.deleteText(selection.index, selection.length, 'user');
+  }
+
+  editor.insertText(selection.index, text, 'user');
+  editor.setSelection(selection.index + text.length, 0, 'silent');
+  return true;
+}
 
 export default function App() {
   const [headers, setHeaders] = useState<string[]>([]);
-  const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [rows, setRows] = useState<ProspectRow[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [activeFilename, setActiveFilename] = useState('prospects.csv');
   const [activeTab, setActiveTab] = useState<'audience' | 'composition'>('audience');
-  
-  const [subject, setSubject] = useState("Objet de l'email");
-  const [body, setBody] = useState("<p>Bonjour {prénom},</p>\n<p>Je me permets de vous contacter...</p>\n<p>Cordialement,<br>Briac de Edichoix</p>");
-  const [senderName, setSenderName] = useState("Briac de Edichoix");
-  const [signature, setSignature] = useState("");
-  const [showSignatureEditor, setShowSignatureEditor] = useState(false);
-  const [attachments, setAttachments] = useState<{name: string, content: string, type: string, size: number}[]>([]);
 
-  const [theme, setTheme] = useState<'light'|'dark'|'system'>('system');
-  const [smtpConfig, setSmtpConfig] = useState({ host: '', port: 465, user: '', pass: '' });
+  const [subject, setSubject] = useState("Objet de l'email");
+  const [body, setBody] = useState(
+    "<p>Bonjour {prénom},</p>\n<p>Je me permets de vous contacter...</p>\n<p>Cordialement,<br>Briac de Edichoix</p>",
+  );
+  const [senderName, setSenderName] = useState('Briac de Edichoix');
+  const [signature, setSignature] = useState('');
+  const [showSignatureEditor, setShowSignatureEditor] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+
+  const [theme, setTheme] = useState<Theme>('system');
+  const [smtpConfig, setSmtpConfig] = useState<SmtpConfig>({
+    host: '',
+    port: 465,
+    user: '',
+    pass: '',
+  });
   const [showSmtpModal, setShowSmtpModal] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [sendResults, setSendResults] = useState<any[]>([]);
-
-  // Track the last focused input to insert variables
-  const [focusedInput, setFocusedInput] = useState<'subject' | 'body' | 'signature' | null>(null);
-  const subjectRef = useRef<HTMLInputElement>(null);
-  const reactQuillRef = useRef<any>(null);
-  const signatureQuillRef = useRef<any>(null);
-
-  const modules = {
-    toolbar: [
-      [{ 'header': [1, 2, 3, false] }],
-      ['bold', 'italic', 'underline', 'strike'],
-      [{ 'list': 'ordered'}, { 'list': 'bullet' }],
-      ['link', 'image'],
-      ['clean'],
-    ],
-  };
-
-  useEffect(() => {
-    fetchFiles();
-    fetchSettings();
-  }, []);
-
-  const fetchSettings = async () => {
-    try {
-      const res = await fetch('/api/settings');
-      const data = await res.json();
-      if (data.emailSignature) setSignature(data.emailSignature);
-      if (data.theme) setTheme(data.theme);
-      if (data.smtpConfig) setSmtpConfig(data.smtpConfig);
-      if (data.senderName) setSenderName(data.senderName);
-    } catch(e) { console.error('Failed to load settings', e); }
-  };
-
-  const saveSettings = async (newSettings: any) => {
-    try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSettings)
-      });
-    } catch(e) { console.error('Failed to save settings', e); }
-  };
-
-  useEffect(() => {
-    if (activeFilename) {
-      fetchProspects();
-    }
-  }, [activeFilename]);
-
-  const fetchFiles = async () => {
-    try {
-      const res = await fetch('/api/files');
-      const data = await res.json();
-      if (data.files) setFiles(data.files);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  useEffect(() => {
-    // Only save theme if it's explicitly explicitly changed by user to prevent empty initial saves
-    document.documentElement.setAttribute('data-theme', theme);
-    saveSettings({ theme });
-  }, [theme]);
-
-  useEffect(() => {
-    const delayDebounce = setTimeout(() => {
-      saveSettings({ smtpConfig, emailSignature: signature, senderName });
-    }, 1000);
-    return () => clearTimeout(delayDebounce);
-  }, [smtpConfig, signature, senderName]);
-
-  const fetchProspects = async () => {
-    setIsLoading(true);
-    try {
-      const res = await fetch(`/api/prospects?filename=${encodeURIComponent(activeFilename)}`);
-      const data = await res.json();
-      if (data.meta && data.meta.fields) {
-        setHeaders(data.meta.fields);
-        setRows(data.data || []);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const saveProspects = async () => {
-    setIsSaving(true);
-    try {
-      await fetch(`/api/prospects?filename=${encodeURIComponent(activeFilename)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ headers, rows })
-      });
-      alert('Liste sauvegardée avec succès !');
-      fetchFiles(); // Refresh history if needed
-    } catch (e) {
-      alert('Erreur lors de la sauvegarde');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const addRow = () => {
-    const newRow: Record<string, string> = {};
-    headers.forEach(h => newRow[h] = "");
-    setRows([...rows, newRow]);
-  };
-
-  const removeRow = (index: number) => {
-    const newRows = [...rows];
-    newRows.splice(index, 1);
-    setRows(newRows);
-  };
-
-  const updateCell = (rowIndex: number, header: string, value: string) => {
-    const newRows = [...rows];
-    newRows[rowIndex][header] = value;
-    setRows(newRows);
-  };
-
-  const [customPrompt, setCustomPrompt] = useState<{
-    isOpen: boolean;
-    title: string;
-    placeholder: string;
-    onConfirm: (val: string) => void;
-  }>({
+  const [sendResults, setSendResults] = useState<SendResult[]>([]);
+  const [customPrompt, setCustomPrompt] = useState<PromptState>({
     isOpen: false,
     title: '',
     placeholder: '',
-    onConfirm: () => {}
+    onConfirm: async () => undefined,
   });
-
   const [promptValue, setPromptValue] = useState('');
 
-  const openPrompt = (title: string, placeholder: string, onConfirm: (val: string) => void) => {
+  const activeEditorRef = useRef<ActiveEditor>('body');
+  const settingsReadyRef = useRef(false);
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const bodyEditorRef = useRef<QuillType | null>(null);
+  const signatureEditorRef = useRef<QuillType | null>(null);
+
+  useEffect(() => {
+    const platform = detectPlatform();
+    document.documentElement.setAttribute('data-platform', platform);
+
+    return () => {
+      document.documentElement.removeAttribute('data-platform');
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadInitialData() {
+      try {
+        const [filesResponse, settingsResponse] = await Promise.all([
+          fetch('/api/files'),
+          fetch('/api/settings'),
+        ]);
+
+        if (!isMounted) {
+          return;
+        }
+
+        const filesData: { files?: string[] } = await filesResponse.json();
+        if (filesData.files) {
+          setFiles(filesData.files);
+        }
+
+        const settingsData: SettingsPayload = await settingsResponse.json();
+        if (settingsData.emailSignature) {
+          setSignature(settingsData.emailSignature);
+        }
+        if (settingsData.theme) {
+          setTheme(settingsData.theme);
+        }
+        if (settingsData.smtpConfig) {
+          setSmtpConfig(settingsData.smtpConfig);
+        }
+        if (settingsData.senderName) {
+          setSenderName(settingsData.senderName);
+        }
+      } catch (error) {
+        console.error('Failed to load application data', error);
+      } finally {
+        if (isMounted) {
+          settingsReadyRef.current = true;
+        }
+      }
+    }
+
+    void loadInitialData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadProspects() {
+      setIsLoading(true);
+
+      try {
+        const response = await fetch(`/api/prospects?filename=${encodeURIComponent(activeFilename)}`);
+        const data: {
+          data?: ProspectRow[];
+          meta?: { fields?: string[] };
+        } = await response.json();
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (data.meta?.fields) {
+          setHeaders(data.meta.fields);
+          setRows(data.data ?? []);
+          return;
+        }
+
+        setHeaders([]);
+        setRows([]);
+      } catch (error) {
+        console.error('Failed to load prospects', error);
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    void loadProspects();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeFilename]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+
+    if (!settingsReadyRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    void fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme }),
+      signal: controller.signal,
+    }).catch((error) => {
+      if (error.name !== 'AbortError') {
+        console.error('Failed to save theme', error);
+      }
+    });
+
+    return () => controller.abort();
+  }, [theme]);
+
+  useEffect(() => {
+    if (!settingsReadyRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const debounceId = window.setTimeout(() => {
+      void fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          smtpConfig,
+          emailSignature: signature,
+          senderName,
+        }),
+        signal: controller.signal,
+      }).catch((error) => {
+        if (error.name !== 'AbortError') {
+          console.error('Failed to save settings', error);
+        }
+      });
+    }, 800);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(debounceId);
+    };
+  }, [senderName, signature, smtpConfig]);
+
+  const refreshFiles = async () => {
+    try {
+      const response = await fetch('/api/files');
+      const data: { files?: string[] } = await response.json();
+      if (data.files) {
+        setFiles(data.files);
+      }
+    } catch (error) {
+      console.error('Failed to refresh file list', error);
+    }
+  };
+
+  const openPrompt = (
+    title: string,
+    placeholder: string,
+    onConfirm: (value: string) => void | Promise<void>,
+  ) => {
     setPromptValue('');
     setCustomPrompt({ isOpen: true, title, placeholder, onConfirm });
   };
 
   const closePrompt = () => {
-    setCustomPrompt({ ...customPrompt, isOpen: false });
+    setCustomPrompt((currentPrompt) => ({
+      ...currentPrompt,
+      isOpen: false,
+    }));
   };
 
-  const handlePromptSubmit = () => {
+  const handlePromptSubmit = async () => {
     if (promptValue.trim()) {
-      customPrompt.onConfirm(promptValue.trim());
+      await customPrompt.onConfirm(promptValue.trim());
     }
     closePrompt();
   };
 
   const addColumn = () => {
     openPrompt(
-      "Ajouter une colonne",
-      "Nom de la nouvelle variable (ex: entreprise)",
+      'Ajouter une colonne',
+      'Nom de la nouvelle variable (ex: entreprise)',
       (name) => {
-        if (!name || headers.includes(name)) return;
-        setHeaders([...headers, name]);
-        const newRows = rows.map(r => ({ ...r, [name]: "" }));
-        setRows(newRows);
-      }
+        if (!name || headers.includes(name)) {
+          return;
+        }
+
+        setHeaders((currentHeaders) => [...currentHeaders, name]);
+        setRows((currentRows) => currentRows.map((row) => ({ ...row, [name]: '' })));
+      },
     );
   };
 
-  const removeColumn = (colName: string) => {
-    if (colName === "email") {
-      alert("La colonne email est obligatoire.");
+  const removeColumn = (columnName: string) => {
+    if (columnName === 'email') {
+      alert('La colonne email est obligatoire.');
       return;
     }
-    if (!confirm(`Supprimer la colonne "${colName}" ?`)) return;
-    
-    setHeaders(headers.filter(h => h !== colName));
-    const newRows = rows.map(r => {
-      const newRow = { ...r };
-      delete newRow[colName];
-      return newRow;
-    });
-    setRows(newRows);
+
+    if (!confirm(`Supprimer la colonne "${columnName}" ?`)) {
+      return;
+    }
+
+    setHeaders((currentHeaders) => currentHeaders.filter((header) => header !== columnName));
+    setRows((currentRows) =>
+      currentRows.map((row) => {
+        const nextRow = { ...row };
+        delete nextRow[columnName];
+        return nextRow;
+      }),
+    );
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const val = e.target.value;
-    if (val === 'CREATE_NEW') {
+  const addRow = () => {
+    const nextRow: ProspectRow = {};
+    for (const header of headers) {
+      nextRow[header] = '';
+    }
+
+    setRows((currentRows) => [...currentRows, nextRow]);
+  };
+
+  const removeRow = (index: number) => {
+    setRows((currentRows) => currentRows.filter((_, rowIndex) => rowIndex !== index));
+  };
+
+  const updateCell = (rowIndex: number, header: string, value: string) => {
+    setRows((currentRows) =>
+      currentRows.map((row, index) => (
+        index === rowIndex ? { ...row, [header]: value } : row
+      )),
+    );
+  };
+
+  const saveProspects = async () => {
+    setIsSaving(true);
+
+    try {
+      await fetch(`/api/prospects?filename=${encodeURIComponent(activeFilename)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ headers, rows }),
+      });
+
+      alert('Liste sauvegardée avec succès !');
+      await refreshFiles();
+    } catch (error) {
+      console.error('Failed to save prospects', error);
+      alert('Erreur lors de la sauvegarde');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextValue = event.target.value;
+
+    if (nextValue === 'CREATE_NEW') {
       openPrompt(
-        "Nouveau fichier",
+        'Nouveau fichier',
         "Nom du nouveau fichier (sans l'extension)",
         async (newName) => {
-          if (newName) {
-            try {
-              const res = await fetch('/api/files', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'create', newFilename: newName })
-              });
-              const data = await res.json();
-              if (data.success) {
-                await fetchFiles();
-                setActiveFilename(data.filename);
-              } else {
-                alert(data.error || "Erreur lors de la création");
-              }
-            } catch(e) { alert("Erreur serveur"); }
+          try {
+            const response = await fetch('/api/files', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'create', newFilename: newName }),
+            });
+            const data: { success?: boolean; filename?: string; error?: string } = await response.json();
+
+            if (!data.success || !data.filename) {
+              alert(data.error || 'Erreur lors de la création');
+              return;
+            }
+
+            await refreshFiles();
+            setActiveFilename(data.filename);
+          } catch (error) {
+            console.error('Failed to create file', error);
+            alert('Erreur serveur');
           }
-        }
+        },
       );
-      // Reset select to previous value until new file is created
-      e.target.value = activeFilename;
+
+      event.target.value = activeFilename;
       return;
     }
-    setActiveFilename(val);
+
+    setActiveFilename(nextValue);
   };
 
   const insertVariable = (variable: string) => {
     const textToInsert = `{${variable}}`;
-    if (focusedInput === 'subject' && subjectRef.current) {
+    const activeEditor = activeEditorRef.current;
+
+    if (activeEditor === 'subject' && subjectRef.current) {
       const input = subjectRef.current;
-      const start = input.selectionStart || 0;
-      const end = input.selectionEnd || 0;
-      const newValue = subject.substring(0, start) + textToInsert + subject.substring(end);
-      setSubject(newValue);
-      setTimeout(() => {
+      const start = input.selectionStart ?? subject.length;
+      const end = input.selectionEnd ?? start;
+      const nextSubject = `${subject.slice(0, start)}${textToInsert}${subject.slice(end)}`;
+      const nextCursor = start + textToInsert.length;
+
+      setSubject(nextSubject);
+      window.requestAnimationFrame(() => {
         input.focus();
-        input.setSelectionRange(start + textToInsert.length, start + textToInsert.length);
-      }, 0);
-    } else if (focusedInput === 'body' && reactQuillRef.current) {
-      const editor = reactQuillRef.current.getEditor();
-      const selection = editor.getSelection();
-      const cursorPosition = selection ? selection.index : editor.getLength();
-      editor.insertText(cursorPosition, textToInsert);
-      setTimeout(() => editor.setSelection(cursorPosition + textToInsert.length), 0);
-    } else if (focusedInput === 'signature' && signatureQuillRef.current) {
-      const editor = signatureQuillRef.current.getEditor();
-      const selection = editor.getSelection();
-      const cursorPosition = selection ? selection.index : editor.getLength();
-      editor.insertText(cursorPosition, textToInsert);
-      setTimeout(() => editor.setSelection(cursorPosition + textToInsert.length), 0);
-    } else {
-      setBody(body + textToInsert);
+        input.setSelectionRange(nextCursor, nextCursor);
+      });
+      return;
+    }
+
+    if (activeEditor === 'signature' && insertTextIntoEditor(signatureEditorRef.current, textToInsert)) {
+      return;
+    }
+
+    if (insertTextIntoEditor(bodyEditorRef.current, textToInsert)) {
+      return;
+    }
+
+    setBody((currentBody) => `${currentBody}${textToInsert}`);
+  };
+
+  const handleVariableBadgeMouseDown = (event: MouseEvent<HTMLButtonElement>, variable: string) => {
+    event.preventDefault();
+    insertVariable(variable);
+  };
+
+  const handleVariableBadgeClick = (event: MouseEvent<HTMLButtonElement>, variable: string) => {
+    if (event.detail === 0) {
+      insertVariable(variable);
     }
   };
 
+  const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.target.files;
+    if (!fileList) {
+      return;
+    }
+
+    for (const file of Array.from(fileList)) {
+      if (file.size > 10 * 1024 * 1024) {
+        alert(`Le fichier ${file.name} est trop volumineux (Max 10MB)`);
+        continue;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (loadEvent) => {
+        const result = loadEvent.target?.result;
+        if (typeof result !== 'string') {
+          return;
+        }
+
+        setAttachments((currentAttachments) => [
+          ...currentAttachments,
+          {
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            content: result,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    event.target.value = '';
+  };
+
+  const removeAttachment = (attachmentIndex: number) => {
+    setAttachments((currentAttachments) =>
+      currentAttachments.filter((_, index) => index !== attachmentIndex),
+    );
+  };
+
   const sendCampaign = async () => {
-    if (!confirm(`Envoyer ${rows.length} emails ?`)) return;
+    if (!confirm(`Envoyer ${rows.length} emails ?`)) {
+      return;
+    }
+
     setIsSending(true);
     setSendResults([]);
+
     try {
       const finalBody = signature ? `${body}<br><br>${signature}` : body;
-      const res = await fetch('/api/send', {
+      const response = await fetch('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject, body: finalBody, recipients: rows, senderName, attachments, smtpConfig, activeFilename })
+        body: JSON.stringify({
+          subject,
+          body: finalBody,
+          recipients: rows,
+          senderName,
+          attachments,
+          smtpConfig,
+          activeFilename,
+        }),
       });
-      const data = await res.json();
+
+      const data: { results?: SendResult[] } = await response.json();
       if (data.results) {
         setSendResults(data.results);
       }
-    } catch (e) {
+    } catch (error) {
+      console.error('Failed to send campaign', error);
       alert("Erreur lors de l'envoi");
     } finally {
       setIsSending(false);
     }
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-
-    // Convert all selected files to base64
-    Array.from(files).forEach(file => {
-      // Basic size limit check (e.g. 10MB to avoid breaking the JSON payload)
-      if (file.size > 10 * 1024 * 1024) {
-        alert(`Le fichier ${file.name} est trop volumineux (Max 10MB)`);
-        return;
-      }
-
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const result = event.target?.result as string;
-        if (result) {
-          // The result is a data URL (e.g., data:application/pdf;base64,JVBERi0xLjQK...)
-          setAttachments(prev => [...prev, {
-            name: file.name,
-            type: file.type,
-            size: file.size,
-            content: result
-          }]);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-    
-    // Reset file input so the same file could be selected again if removed
-    e.target.value = '';
-  };
-
-  const removeAttachment = (indexToRemove: number) => {
-    setAttachments(attachments.filter((_, idx) => idx !== indexToRemove));
   };
 
   return (
@@ -347,15 +555,17 @@ export default function App() {
           </div>
           <div>
             <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 600 }}>EdiProspect</h1>
-            <p style={{ margin: 0, color: 'var(--text-muted)' }}>Gestionnaire de Campagnes d'Emails Personnalisées</p>
+            <p style={{ margin: 0, color: 'var(--text-muted)' }}>
+              Gestionnaire de Campagnes d&apos;Emails Personnalisées
+            </p>
           </div>
         </div>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-          <select 
-            className="btn-secondary" 
-            style={{ padding: '0.5rem 1rem', borderRadius: '8px', cursor: 'pointer' }} 
-            value={theme} 
-            onChange={(e) => setTheme(e.target.value as any)}
+          <select
+            className="btn-secondary"
+            style={{ padding: '0.5rem 1rem', borderRadius: '8px', cursor: 'pointer' }}
+            value={theme}
+            onChange={(event) => setTheme(event.target.value as Theme)}
           >
             <option value="system">Auto</option>
             <option value="light">Clair</option>
@@ -368,71 +578,100 @@ export default function App() {
       </header>
 
       {showSmtpModal && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.6)', zIndex: 100, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+        <div className="modal-backdrop">
           <div className="card" style={{ width: '400px', maxWidth: '90%' }}>
             <div className="card-header">
               <h2 style={{ fontSize: '1.1rem' }}>Paramètres SMTP</h2>
-              <button className="btn-icon-only btn-secondary" onClick={() => setShowSmtpModal(false)}><X className="w-4 h-4" /></button>
+              <button className="btn-icon-only btn-secondary" onClick={() => setShowSmtpModal(false)}>
+                <X className="w-4 h-4" />
+              </button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div>
-                <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.2rem' }}>Serveur (Host)</label>
-                <input type="text" value={smtpConfig.host} onChange={e => setSmtpConfig({...smtpConfig, host: e.target.value})} placeholder="ex: mail.infomaniak.com" />
+                <label className="form-label">Serveur (Host)</label>
+                <input
+                  type="text"
+                  value={smtpConfig.host}
+                  onChange={(event) => setSmtpConfig({ ...smtpConfig, host: event.target.value })}
+                  placeholder="ex: mail.infomaniak.com"
+                />
               </div>
               <div>
-                <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.2rem' }}>Port</label>
-                <input type="number" value={smtpConfig.port} onChange={e => setSmtpConfig({...smtpConfig, port: Number(e.target.value)})} />
+                <label className="form-label">Port</label>
+                <input
+                  type="number"
+                  value={smtpConfig.port}
+                  onChange={(event) => setSmtpConfig({ ...smtpConfig, port: Number(event.target.value) })}
+                />
               </div>
               <div>
-                <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.2rem' }}>Utilisateur (Email)</label>
-                <input type="text" value={smtpConfig.user} onChange={e => setSmtpConfig({...smtpConfig, user: e.target.value})} placeholder="email@domaine.com" />
+                <label className="form-label">Utilisateur (Email)</label>
+                <input
+                  type="text"
+                  value={smtpConfig.user}
+                  onChange={(event) => setSmtpConfig({ ...smtpConfig, user: event.target.value })}
+                  placeholder="email@domaine.com"
+                />
               </div>
               <div>
-                <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.2rem' }}>Mot de passe</label>
-                <input type="password" value={smtpConfig.pass} onChange={e => setSmtpConfig({...smtpConfig, pass: e.target.value})} placeholder="********" />
+                <label className="form-label">Mot de passe</label>
+                <input
+                  type="password"
+                  value={smtpConfig.pass}
+                  onChange={(event) => setSmtpConfig({ ...smtpConfig, pass: event.target.value })}
+                  placeholder="********"
+                />
               </div>
-              <button className="btn-primary" onClick={() => setShowSmtpModal(false)} style={{ marginTop: '0.5rem' }}>Sauvegarder</button>
+              <button className="btn-primary" onClick={() => setShowSmtpModal(false)} style={{ marginTop: '0.5rem' }}>
+                Sauvegarder
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* CUSTOM PROMPT MODAL */}
       {customPrompt.isOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.6)', zIndex: 110, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+        <div className="modal-backdrop" style={{ zIndex: 110 }}>
           <div className="card" style={{ width: '400px', maxWidth: '90%' }}>
             <div className="card-header">
               <h2 style={{ fontSize: '1.1rem' }}>{customPrompt.title}</h2>
-              <button className="btn-icon-only btn-secondary" onClick={closePrompt}><X className="w-4 h-4" /></button>
+              <button className="btn-icon-only btn-secondary" onClick={closePrompt}>
+                <X className="w-4 h-4" />
+              </button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <input 
-                type="text" 
+              <input
+                type="text"
                 autoFocus
-                value={promptValue} 
-                onChange={e => setPromptValue(e.target.value)} 
-                placeholder={customPrompt.placeholder} 
-                onKeyDown={e => { if (e.key === 'Enter') handlePromptSubmit(); else if (e.key === 'Escape') closePrompt(); }}
+                value={promptValue}
+                onChange={(event) => setPromptValue(event.target.value)}
+                placeholder={customPrompt.placeholder}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    void handlePromptSubmit();
+                  } else if (event.key === 'Escape') {
+                    closePrompt();
+                  }
+                }}
               />
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.5rem' }}>
                 <button className="btn-secondary" onClick={closePrompt}>Annuler</button>
-                <button className="btn-primary" onClick={handlePromptSubmit}>Confirmer</button>
+                <button className="btn-primary" onClick={() => void handlePromptSubmit()}>Confirmer</button>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* TABS NAVIGATION */}
       <div className="tabs-container">
-        <button 
+        <button
           className={`tab-btn ${activeTab === 'audience' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('audience')}
         >
           <Users className="w-4 h-4" style={{ display: 'inline', marginRight: '0.5rem', verticalAlign: 'middle' }} />
           Audience et Contacts
         </button>
-        <button 
+        <button
           className={`tab-btn ${activeTab === 'composition' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('composition')}
         >
@@ -442,73 +681,83 @@ export default function App() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-        {/* TAB 1: AUDIENCE */}
         {activeTab === 'audience' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-          
             <div className="card" style={{ width: '100%' }}>
               <div className="card-header">
                 <h2><Users className="w-5 h-5 text-primary" /> Audience (CSV)</h2>
-                <select className="btn-secondary" value={activeFilename} onChange={handleFileChange} style={{ maxWidth: '200px', padding: '0.4rem 0.8rem', borderRadius: '6px' }}>
-                  {files.map(f => <option key={f} value={f}>{f}</option>)}
+                <select
+                  className="btn-secondary"
+                  value={activeFilename}
+                  onChange={handleFileChange}
+                  style={{ maxWidth: '200px', padding: '0.4rem 0.8rem', borderRadius: '6px' }}
+                >
+                  {files.map((file) => (
+                    <option key={file} value={file}>{file}</option>
+                  ))}
                   <option value="CREATE_NEW" style={{ fontWeight: 'bold' }}>+ Créer un nouveau...</option>
                 </select>
               </div>
-            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '-0.5rem', marginBottom: '0.5rem' }}>
-              <button className="btn-secondary" onClick={addColumn}><Plus className="w-4 h-4" /> Colonne</button>
-              <button className="btn-secondary" onClick={saveProspects} disabled={isSaving}>
-                <Save className="w-4 h-4" /> {isSaving ? '...' : 'Save'}
+              <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '-0.5rem', marginBottom: '0.5rem' }}>
+                <button className="btn-secondary" onClick={addColumn}>
+                  <Plus className="w-4 h-4" /> Colonne
+                </button>
+                <button className="btn-secondary" onClick={saveProspects} disabled={isSaving}>
+                  <Save className="w-4 h-4" /> {isSaving ? '...' : 'Save'}
+                </button>
+              </div>
+
+              {isLoading ? (
+                <p>Chargement...</p>
+              ) : (
+                <div className="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr>
+                        {headers.map((header) => (
+                          <th key={header}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
+                              {header}
+                              {header !== 'email' && (
+                                <button className="btn-icon-only btn-danger" style={{ padding: '0.2rem' }} onClick={() => removeColumn(header)}>
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          </th>
+                        ))}
+                        <th style={{ width: '50px' }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, rowIndex) => (
+                        <tr key={`${activeFilename}-${rowIndex}`}>
+                          {headers.map((header) => (
+                            <td key={`${rowIndex}-${header}`}>
+                              <input
+                                type="text"
+                                value={row[header] || ''}
+                                onChange={(event) => updateCell(rowIndex, header, event.target.value)}
+                                placeholder={header}
+                              />
+                            </td>
+                          ))}
+                          <td>
+                            <button className="btn-icon-only btn-danger" onClick={() => removeRow(rowIndex)}>
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <button className="btn-secondary" onClick={addRow} style={{ alignSelf: 'flex-start' }}>
+                <Plus className="w-4 h-4" /> Ajouter un prospect
               </button>
             </div>
-            
-            {isLoading ? <p>Chargement...</p> : (
-              <div className="table-wrapper">
-                <table>
-                  <thead>
-                    <tr>
-                      {headers.map((h, i) => (
-                        <th key={i}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
-                            {h}
-                            {h !== 'email' && (
-                              <button className="btn-icon-only btn-danger" style={{ padding: '0.2rem' }} onClick={() => removeColumn(h)}>
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            )}
-                          </div>
-                        </th>
-                      ))}
-                      <th style={{ width: '50px' }}></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row, rIdx) => (
-                      <tr key={rIdx}>
-                        {headers.map((h, cIdx) => (
-                          <td key={cIdx}>
-                            <input 
-                              type="text" 
-                              value={row[h] || ''} 
-                              onChange={(e) => updateCell(rIdx, h, e.target.value)}
-                              placeholder={h}
-                            />
-                          </td>
-                        ))}
-                        <td>
-                          <button className="btn-icon-only btn-danger" onClick={() => removeRow(rIdx)}>
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            <button className="btn-secondary" onClick={addRow} style={{ alignSelf: 'flex-start' }}>
-              <Plus className="w-4 h-4" /> Ajouter un prospect
-            </button>
-          </div>
 
             <div className="card" style={{ width: '100%' }}>
               <div className="card-header">
@@ -516,99 +765,109 @@ export default function App() {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <div>
-                  <label style={{ display: 'block', marginBottom: '0.5rem', color: '#a1a1aa' }}>Nom de l'expéditeur</label>
-                  <input 
-                    type="text" 
-                    value={senderName} 
-                    onChange={(e) => setSenderName(e.target.value)} 
+                  <label style={{ display: 'block', marginBottom: '0.5rem', color: '#a1a1aa' }}>
+                    Nom de l&apos;expéditeur
+                  </label>
+                  <input
+                    type="text"
+                    value={senderName}
+                    onChange={(event) => setSenderName(event.target.value)}
                   />
                 </div>
               </div>
             </div>
-
           </div>
         )}
 
-        {/* TAB 2: COMPOSITION & SEND */}
         {activeTab === 'composition' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', width: '100%' }}>
-            
             <div className="card">
               <div className="card-header">
                 <h2><Mail className="w-5 h-5 text-primary" /> Composition</h2>
               </div>
-              
+
               <div style={{ marginBottom: '1rem' }}>
-                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginRight: '0.5rem' }}>Variables disponibles:</span>
-                {headers.map(h => (
-                  <span key={h} className="badge" onClick={() => insertVariable(h)}>
-                    +{h}
-                  </span>
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginRight: '0.5rem' }}>
+                  Variables disponibles:
+                </span>
+                {headers.map((header) => (
+                  <button
+                    key={header}
+                    type="button"
+                    className="badge"
+                    onMouseDown={(event) => handleVariableBadgeMouseDown(event, header)}
+                    onClick={(event) => handleVariableBadgeClick(event, header)}
+                  >
+                    +{header}
+                  </button>
                 ))}
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <div>
                   <label style={{ display: 'block', marginBottom: '0.5rem', color: '#a1a1aa' }}>Sujet</label>
-                  <input 
+                  <input
                     ref={subjectRef}
-                    type="text" 
-                    value={subject} 
-                    onChange={(e) => setSubject(e.target.value)}
-                    onFocus={() => setFocusedInput('subject')}
+                    type="text"
+                    value={subject}
+                    onChange={(event) => setSubject(event.target.value)}
+                    onFocus={() => {
+                      activeEditorRef.current = 'subject';
+                    }}
                   />
                 </div>
-                
+
                 <div>
                   <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)' }}>Message HTML</label>
-                  <div style={{ background: 'var(--input-bg)', borderRadius: '8px', overflow: 'hidden' }} onClick={() => setFocusedInput('body')}>
-                    <WrappedQuill 
-                      forwardedRef={reactQuillRef}
-                      theme="snow" 
-                      value={body} 
-                      onChange={setBody} 
-                      modules={modules}
-                      style={{ minHeight: '350px' }}
-                    />
-                  </div>
+                  <RichTextEditor
+                    value={body}
+                    onChange={setBody}
+                    editorRef={bodyEditorRef}
+                    minHeight={350}
+                    onFocus={() => {
+                      activeEditorRef.current = 'body';
+                    }}
+                  />
                 </div>
 
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                     <label style={{ color: 'var(--text-muted)' }}>Signature</label>
-                    <button 
-                      className="btn-secondary" 
+                    <button
+                      className="btn-secondary"
                       style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
-                      onClick={() => setShowSignatureEditor(!showSignatureEditor)}
+                      onClick={() => setShowSignatureEditor((current) => !current)}
                     >
                       {showSignatureEditor ? 'Masquer' : 'Modifier la signature'}
                     </button>
                   </div>
-                  
+
                   {showSignatureEditor ? (
-                    <div style={{ background: 'var(--input-bg)', borderRadius: '8px', overflow: 'hidden' }} onClick={() => setFocusedInput('signature')}>
-                      <WrappedQuill 
-                        forwardedRef={signatureQuillRef}
-                        theme="snow" 
-                        value={signature} 
-                        onChange={setSignature} 
-                        modules={modules}
-                        style={{ minHeight: '150px' }}
-                      />
-                    </div>
+                    <RichTextEditor
+                      value={signature}
+                      onChange={setSignature}
+                      editorRef={signatureEditorRef}
+                      minHeight={150}
+                      onFocus={() => {
+                        activeEditorRef.current = 'signature';
+                      }}
+                    />
                   ) : (
-                    <div 
+                    <div
+                      className="signature-preview"
                       onClick={() => setShowSignatureEditor(true)}
-                      style={{ 
-                        background: 'var(--table-bg)', 
-                        padding: '1rem', 
-                        borderRadius: '8px', 
+                      style={{
+                        background: 'var(--table-bg)',
+                        padding: '1rem',
+                        borderRadius: '8px',
                         border: '1px dashed var(--card-border)',
                         cursor: 'pointer',
                         minHeight: '60px',
-                        opacity: signature ? 1 : 0.5
+                        opacity: signature ? 1 : 0.5,
                       }}
-                      dangerouslySetInnerHTML={{ __html: signature || '<em>Aucune signature configurée. Cliquez pour ajouter.</em>' }}
+                      dangerouslySetInnerHTML={{
+                        __html: signature || '<em>Aucune signature configurée. Cliquez pour ajouter.</em>',
+                      }}
                     />
                   )}
                   <p style={{ fontSize: '0.75rem', color: '#71717a', marginTop: '0.5rem' }}>
@@ -616,18 +875,17 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* Attachments UI */}
                 <div style={{ background: 'var(--table-bg)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--card-border)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', margin: 0 }}>
                       <Paperclip className="w-4 h-4" /> Pièces jointes ({attachments.length})
                     </label>
                     <div>
-                      <input 
-                        type="file" 
-                        id="file-upload" 
-                        multiple 
-                        style={{ display: 'none' }} 
+                      <input
+                        type="file"
+                        id="file-upload"
+                        multiple
+                        style={{ display: 'none' }}
                         onChange={handleFileUpload}
                       />
                       <label htmlFor="file-upload" className="btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', cursor: 'pointer', padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: '6px' }}>
@@ -638,12 +896,12 @@ export default function App() {
 
                   {attachments.length > 0 && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      {attachments.map((att, idx) => (
-                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--table-header)', padding: '0.5rem', borderRadius: '6px' }}>
+                      {attachments.map((attachment, index) => (
+                        <div key={`${attachment.name}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--table-header)', padding: '0.5rem', borderRadius: '6px' }}>
                           <span style={{ fontSize: '0.85rem', width: '200px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {att.name} <span style={{ color: 'var(--text-muted)' }}>({(att.size / 1024).toFixed(0)} KB)</span>
+                            {attachment.name} <span style={{ color: 'var(--text-muted)' }}>({(attachment.size / 1024).toFixed(0)} KB)</span>
                           </span>
-                          <button className="btn-icon-only btn-danger" onClick={() => removeAttachment(idx)} title="Supprimer">
+                          <button className="btn-icon-only btn-danger" onClick={() => removeAttachment(index)} title="Supprimer">
                             <X className="w-4 h-4" />
                           </button>
                         </div>
@@ -659,11 +917,11 @@ export default function App() {
                 <h2><Send className="w-5 h-5 text-primary" /> Lancement</h2>
               </div>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
-                Prêt à envoyer les emails à {rows.length > 0 ? rows.filter(r => r.email).length : 0} contacts valides. Assurez-vous d'avoir sauvegardé vos modifications.
+                Prêt à envoyer les emails à {rows.length > 0 ? rows.filter((row) => row.email).length : 0} contacts valides. Assurez-vous d&apos;avoir sauvegardé vos modifications.
               </p>
-              <button 
-                className="btn-primary" 
-                onClick={sendCampaign} 
+              <button
+                className="btn-primary"
+                onClick={sendCampaign}
                 disabled={isSending || rows.length === 0}
                 style={{ padding: '1rem', fontSize: '1.1rem' }}
               >
@@ -673,15 +931,21 @@ export default function App() {
 
               {sendResults.length > 0 && (
                 <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--card-border)', paddingTop: '1rem' }}>
-                  <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Résultats ({sendResults.filter(r => r.status === 'success').length}/{sendResults.length})</h3>
+                  <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>
+                    Résultats ({sendResults.filter((result) => result.status === 'success').length}/{sendResults.length})
+                  </h3>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
-                    {sendResults.map((r, i) => (
-                      <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem', background: 'var(--table-bg)', borderRadius: '6px' }}>
-                        <span style={{ fontSize: '0.85rem' }}>{r.email}</span>
-                        {r.status === 'success' ? (
-                          <span className="status-badge status-success" style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}><CheckCircle2 className="w-3 h-3"/> Envoyé</span>
+                    {sendResults.map((result) => (
+                      <div key={`${result.email}-${result.status}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem', background: 'var(--table-bg)', borderRadius: '6px' }}>
+                        <span style={{ fontSize: '0.85rem' }}>{result.email}</span>
+                        {result.status === 'success' ? (
+                          <span className="status-badge status-success" style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                            <CheckCircle2 className="w-3 h-3" /> Envoyé
+                          </span>
                         ) : (
-                          <span className="status-badge status-error" title={r.error} style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}><AlertCircle className="w-3 h-3"/> Erreur</span>
+                          <span className="status-badge status-error" title={result.error} style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                            <AlertCircle className="w-3 h-3" /> Erreur
+                          </span>
                         )}
                       </div>
                     ))}
@@ -689,7 +953,6 @@ export default function App() {
                 </div>
               )}
             </div>
-
           </div>
         )}
       </div>

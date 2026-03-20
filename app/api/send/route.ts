@@ -1,20 +1,48 @@
 import { NextResponse } from 'next/server';
-import nodemailer from 'nodemailer';
+import nodemailer, { type SendMailOptions } from 'nodemailer';
 import tls from 'tls';
 
 import Papa from 'papaparse';
 import fs from 'fs';
 import path from 'path';
 
-/**
- * Minimal IMAP APPEND using Node.js built-in tls module.
- * No external imap library needed — avoids Electron/Next.js bundling issues.
- */
+type Recipient = Record<string, string>;
+type AttachmentPayload = {
+  name: string;
+  content: string;
+  type: string;
+  size: number;
+};
+type SmtpConfigPayload = Partial<{
+  host: string;
+  port: number;
+  user: string;
+  pass: string;
+}>;
+type SendRequestPayload = {
+  subject?: string;
+  body?: string;
+  recipients?: Recipient[];
+  senderName?: string;
+  attachments?: AttachmentPayload[];
+  smtpConfig?: SmtpConfigPayload;
+  activeFilename?: string;
+};
+type SendResult = {
+  email: string;
+  status: 'success' | 'error';
+  error?: string;
+};
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Unknown error';
+}
+
 function appendToSentFolder(
   imapHost: string,
   imapUser: string,
   imapPass: string,
-  rawEmail: string
+  rawEmail: string,
 ): Promise<void> {
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
@@ -30,23 +58,23 @@ function appendToSentFolder(
       const sentFolders = ['Sent', 'INBOX.Sent', 'Sent Messages'];
       let folderIndex = 0;
 
-      const sendCommand = (cmd: string) => {
+      const sendCommand = (command: string) => {
         const tag = `A${tagCounter++}`;
-        socket.write(`${tag} ${cmd}\r\n`);
+        socket.write(`${tag} ${command}\r\n`);
         return tag;
       };
 
       const tryAppendNextFolder = () => {
         if (folderIndex >= sentFolders.length) {
-          // No folder worked, logout anyway
           console.warn('Could not find Sent folder, skipping IMAP append');
           step = 99;
           sendCommand('LOGOUT');
           return;
         }
+
         const folder = sentFolders[folderIndex];
         const emailBytes = Buffer.byteLength(rawEmail, 'utf-8');
-        step = 3; // waiting for append literal ready
+        step = 3;
         const tag = `A${tagCounter++}`;
         socket.write(`${tag} APPEND "${folder}" (\\Seen) {${emailBytes}}\r\n`);
       };
@@ -58,33 +86,27 @@ function appendToSentFolder(
 
         for (const line of lines) {
           if (step === 0 && line.startsWith('* OK')) {
-            // Server greeting received, login
             step = 1;
             sendCommand(`LOGIN "${imapUser.replace(/"/g, '\\"')}" "${imapPass.replace(/"/g, '\\"')}"`);
           } else if (step === 1 && /^A\d+ OK/i.test(line)) {
-            // Login successful, try first Sent folder
             step = 2;
             folderIndex = 0;
             tryAppendNextFolder();
           } else if (step === 1 && /^A\d+ (NO|BAD)/i.test(line)) {
-            // Login failed
             console.error('IMAP login failed:', line);
             clearTimeout(timeout);
             socket.destroy();
             resolve();
           } else if (step === 3 && line.startsWith('+')) {
-            // Server ready for literal data
-            socket.write(rawEmail + '\r\n');
-            step = 4; // waiting for append result
+            socket.write(`${rawEmail}\r\n`);
+            step = 4;
           } else if (step === 4 && /^A\d+ OK/i.test(line)) {
-            // Append successful, logout
             step = 99;
             sendCommand('LOGOUT');
           } else if (step === 4 && /^A\d+ (NO|BAD)/i.test(line)) {
-            // This folder didn't work, try next
             folderIndex++;
             tryAppendNextFolder();
-          } else if (step === 99 && /^A\d+ OK|^\* BYE/i.test(line)) {
+          } else if (step === 99 && (/^A\d+ OK/.test(line) || /^\* BYE/i.test(line))) {
             clearTimeout(timeout);
             socket.destroy();
             resolve();
@@ -92,8 +114,8 @@ function appendToSentFolder(
         }
       });
 
-      socket.on('error', (err: Error) => {
-        console.error('IMAP socket error:', err.message);
+      socket.on('error', (error: Error) => {
+        console.error('IMAP socket error:', error.message);
         clearTimeout(timeout);
         resolve();
       });
@@ -104,19 +126,15 @@ function appendToSentFolder(
       });
     });
 
-    socket.on('error', (err: Error) => {
-      console.error('IMAP TLS connection error:', err.message);
+    socket.on('error', (error: Error) => {
+      console.error('IMAP TLS connection error:', error.message);
       clearTimeout(timeout);
       resolve();
     });
   });
 }
 
-/**
- * Build a raw RFC 2822 email string from the message options,
- * using nodemailer's internal MailComposer.
- */
-async function buildRawEmail(mailOptions: Record<string, any>): Promise<string> {
+async function buildRawEmail(mailOptions: SendMailOptions) {
   const MailComposer = (await import('nodemailer/lib/mail-composer')).default;
   const mail = new MailComposer(mailOptions);
   const message = await mail.compile().build();
@@ -125,109 +143,126 @@ async function buildRawEmail(mailOptions: Record<string, any>): Promise<string> 
 
 export async function POST(request: Request) {
   try {
-    const { subject, body, recipients, senderName, attachments = [], smtpConfig, activeFilename } = await request.json();
+    const {
+      subject,
+      body,
+      recipients = [],
+      senderName,
+      attachments = [],
+      smtpConfig,
+      activeFilename,
+    } = await request.json() as SendRequestPayload;
 
-    if (!subject || !body || !recipients || recipients.length === 0) {
+    if (!subject || !body || recipients.length === 0) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const host = smtpConfig?.host || process.env.SMTP_HOST || "mail.infomaniak.com";
-    const port = smtpConfig?.port ? Number(smtpConfig.port) : (process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587);
+    const host = smtpConfig?.host || process.env.SMTP_HOST || 'mail.infomaniak.com';
+    const port = smtpConfig?.port
+      ? Number(smtpConfig.port)
+      : (process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587);
     const user = smtpConfig?.user || process.env.SMTP_USER;
     const pass = smtpConfig?.pass || process.env.SMTP_PASS;
+
+    if (!user || !pass) {
+      return NextResponse.json({ error: 'Missing SMTP credentials' }, { status: 400 });
+    }
 
     const transporter = nodemailer.createTransport({
       host,
       port,
-      secure: port === 465, // true for 465, false for other ports
+      secure: port === 465,
       auth: {
         user,
         pass,
       },
     });
 
-    const results: any[] = [];
-    const name = senderName || "Briac de Edichoix";
-    
-    // Parse attachments from base64
-    const parsedAttachments = attachments.map((att: any) => {
-      const base64Content = att.content.split(';base64,').pop();
+    const parsedAttachments = attachments.map((attachment) => {
+      const base64Content = attachment.content.split(';base64,').pop() ?? '';
       return {
-        filename: att.name,
+        filename: attachment.name,
         content: Buffer.from(base64Content, 'base64'),
-        contentType: att.type
+        contentType: attachment.type,
       };
     });
 
+    const results: SendResult[] = [];
+    const name = senderName || 'Briac de Edichoix';
+
     for (const recipient of recipients) {
-      if (!recipient.email) continue;
-      
+      if (!recipient.email) {
+        continue;
+      }
+
       let personalizedSubject = subject;
       let personalizedBody = body;
 
       for (const [key, value] of Object.entries(recipient)) {
-        if (value && typeof value === 'string') {
-           const regex = new RegExp(`{${key}}`, 'gi');
-           personalizedSubject = personalizedSubject.replace(regex, value);
-           personalizedBody = personalizedBody.replace(regex, value);
+        if (value) {
+          const regex = new RegExp(`{${key}}`, 'gi');
+          personalizedSubject = personalizedSubject.replace(regex, value);
+          personalizedBody = personalizedBody.replace(regex, value);
         }
       }
 
-      const mailOptions = {
+      const mailOptions: SendMailOptions = {
         from: `"${name}" <${user}>`,
         to: recipient.email,
         subject: personalizedSubject,
         html: personalizedBody,
-        attachments: parsedAttachments
+        attachments: parsedAttachments,
       };
 
       try {
         await transporter.sendMail(mailOptions);
         results.push({ email: recipient.email, status: 'success' });
 
-        // Copy email to Sent folder via IMAP
         try {
           const rawEmail = await buildRawEmail(mailOptions);
-          await appendToSentFolder(host, user!, pass!, rawEmail);
-        } catch (imapErr: any) {
-          console.error(`Failed to copy email to Sent folder for ${recipient.email}:`, imapErr.message);
-          // Don't fail the send result if IMAP copy fails
+          await appendToSentFolder(host, user, pass, rawEmail);
+        } catch (imapError) {
+          console.error(
+            `Failed to copy email to Sent folder for ${recipient.email}:`,
+            getErrorMessage(imapError),
+          );
         }
-      } catch (err: any) {
-        results.push({ email: recipient.email, status: 'error', error: err.message });
+      } catch (error) {
+        results.push({
+          email: recipient.email,
+          status: 'error',
+          error: getErrorMessage(error),
+        });
       }
-      
-      // Small delay to prevent rate limits
-      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    // --- Save Campaign History ---
     try {
       if (activeFilename && results.length > 0) {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
         const baseName = activeFilename.replace('.csv', '');
         const historyFilename = `${baseName}_history_${timestamp}.csv`;
-        
         const basePath = process.env.APPDATA_DIR || process.cwd();
         const historyPath = path.join(basePath, 'data', historyFilename);
 
-        // Map results back to recipients to add a Status column
-        const updatedRecipients = recipients.map((rec: any) => {
-          const res = results.find(r => r.email === rec.email);
+        const updatedRecipients = recipients.map((recipient) => {
+          const result = results.find((sendResult) => sendResult.email === recipient.email);
           return {
-            ...rec,
-            Status: res ? res.status : 'skipped',
-            Error: res && res.error ? res.error : ''
+            ...recipient,
+            Status: result ? result.status : 'skipped',
+            Error: result?.error || '',
           };
         });
 
-        // Determine all columns
         const allKeys = new Set<string>();
-        updatedRecipients.forEach((r: any) => Object.keys(r).forEach(k => allKeys.add(k)));
-        
+        updatedRecipients.forEach((recipient) => {
+          Object.keys(recipient).forEach((key) => allKeys.add(key));
+        });
+
         const csvContent = Papa.unparse({
           fields: Array.from(allKeys),
-          data: updatedRecipients
+          data: updatedRecipients,
         });
 
         fs.writeFileSync(historyPath, csvContent, 'utf-8');
@@ -235,13 +270,14 @@ export async function POST(request: Request) {
       }
     } catch (saveError) {
       console.error('Failed to save history CSV:', saveError);
-      // We don't fail the request if history saving fails, but we log it.
     }
 
     return NextResponse.json({ success: true, results });
-
-  } catch (error: any) {
+  } catch (error) {
     console.error('Send error:', error);
-    return NextResponse.json({ error: 'Internal Server Error', details: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Internal Server Error', details: getErrorMessage(error) },
+      { status: 500 },
+    );
   }
 }

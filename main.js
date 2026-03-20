@@ -40,7 +40,7 @@ function createWindow() {
   // app.isPackaged is the ONLY reliable way to detect production in Electron.
   // process.env.NODE_ENV is NOT set in packaged apps.
   if (!app.isPackaged) {
-    // DEV: Next.js dev server is already running via 'npm run dev'
+    // DEV: Next.js dev server is already running via 'pnpm run dev'
     mainWindow.loadURL('http://localhost:3000');
   } else {
     // PRODUCTION: Start the standalone Next.js server in-process.

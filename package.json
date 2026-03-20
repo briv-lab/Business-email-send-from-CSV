@@ -9,8 +9,8 @@
     "start": "next start",
     "lint": "eslint",
     "electron": "wait-on tcp:3000 && electron .",
-    "dev:electron": "concurrently -k \"npm run dev\" \"npm run electron\"",
-    "build:electron": "npm run build && node -e \"const fs=require('fs');fs.cpSync('.next/static','.next/standalone/.next/static',{recursive:true});fs.cpSync('public','.next/standalone/public',{recursive:true})\" && electron-builder build"
+    "dev:electron": "concurrently -k \"pnpm run dev\" \"pnpm run electron\"",
+    "build:electron": "pnpm run build && node scripts/prepare-electron-build.mjs && electron-builder build"
   },
   "build": {
     "appId": "com.edichoix.ediprospect",
@@ -37,9 +37,9 @@
     "next": "16.1.6",
     "nodemailer": "^8.0.1",
     "papaparse": "^5.5.3",
+    "quill": "^2.0.3",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "react-quill-new": "^3.8.3"
+    "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@types/node": "^20",
