@@ -1,24 +1,16 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
-import path from 'path';
-import Papa from 'papaparse';
-
-const basePath = process.env.APPDATA_DIR || process.cwd();
-const DATA_DIR = path.join(basePath, 'data');
-type ProspectRow = Record<string, string>;
-
-function ensureDataDirectory() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
+import {
+  buildCsvContent,
+  ensureDataDirectory,
+  getProspectFilePath,
+  parseProspectsCsv,
+  type ProspectRow,
+} from '@/lib/server/prospect-storage';
 
 function getFilePath(request: Request) {
   const { searchParams } = new URL(request.url);
-  const filename = searchParams.get('filename') || 'prospects.csv';
-  // Ensure we don't traverse directories
-  const safeFilename = path.basename(filename);
-  return path.join(DATA_DIR, safeFilename);
+  return getProspectFilePath(searchParams.get('filename'));
 }
 
 export async function GET(request: Request) {
@@ -28,7 +20,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ data: [], meta: { fields: [] } });
     }
     const fileContent = fs.readFileSync(filePath, 'utf-8');
-    const parsed = Papa.parse(fileContent, { header: true, skipEmptyLines: true });
+    const parsed = parseProspectsCsv(fileContent);
     return NextResponse.json(parsed);
   } catch {
     return NextResponse.json({ error: 'Failed to read prospects CSV' }, { status: 500 });
@@ -49,11 +41,7 @@ export async function POST(request: Request) {
     }
 
     const filePath = getFilePath(request);
-
-    const csvContent = Papa.unparse({
-      fields: headers,
-      data: rows
-    });
+    const csvContent = buildCsvContent(headers, rows);
 
     ensureDataDirectory();
     fs.writeFileSync(filePath, csvContent, 'utf-8');

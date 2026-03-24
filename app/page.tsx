@@ -5,6 +5,7 @@ import type QuillType from 'quill';
 import {
   AlertCircle,
   CheckCircle2,
+  Download,
   Mail,
   Paperclip,
   Plus,
@@ -12,6 +13,7 @@ import {
   Send,
   Settings,
   Trash2,
+  Upload,
   Users,
   X,
 } from 'lucide-react';
@@ -114,6 +116,8 @@ export default function App() {
   const [showSmtpModal, setShowSmtpModal] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [sendResults, setSendResults] = useState<SendResult[]>([]);
@@ -126,6 +130,7 @@ export default function App() {
   const [promptValue, setPromptValue] = useState('');
 
   const activeEditorRef = useRef<ActiveEditor>('body');
+  const importInputRef = useRef<HTMLInputElement>(null);
   const settingsReadyRef = useRef(false);
   const subjectRef = useRef<HTMLInputElement>(null);
   const bodyEditorRef = useRef<QuillType | null>(null);
@@ -371,23 +376,96 @@ export default function App() {
     );
   };
 
-  const saveProspects = async () => {
+  const persistProspects = async ({ showSuccessMessage = false }: { showSuccessMessage?: boolean } = {}) => {
     setIsSaving(true);
 
     try {
-      await fetch(`/api/prospects?filename=${encodeURIComponent(activeFilename)}`, {
+      const response = await fetch(`/api/prospects?filename=${encodeURIComponent(activeFilename)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ headers, rows }),
       });
 
-      alert('Liste sauvegardée avec succès !');
+      if (!response.ok) {
+        throw new Error('Failed to save prospects');
+      }
+
       await refreshFiles();
+      if (showSuccessMessage) {
+        alert('Liste sauvegardée avec succès !');
+      }
     } catch (error) {
       console.error('Failed to save prospects', error);
       alert('Erreur lors de la sauvegarde');
+      throw error;
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const saveProspects = async () => {
+    await persistProspects({ showSuccessMessage: true });
+  };
+
+  const exportProspects = async () => {
+    try {
+      await persistProspects();
+
+      const exportUrl = `/api/prospects/export?filename=${encodeURIComponent(activeFilename)}`;
+      const downloadLink = document.createElement('a');
+      downloadLink.href = exportUrl;
+      downloadLink.download = activeFilename;
+      downloadLink.rel = 'noopener';
+      document.body.append(downloadLink);
+      downloadLink.click();
+      downloadLink.remove();
+    } catch (error) {
+      console.error('Failed to export prospects', error);
+    }
+  };
+
+  const triggerImport = () => {
+    importInputRef.current?.click();
+  };
+
+  const importProspects = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    setIsImporting(true);
+
+    try {
+      const formData = new FormData();
+      formData.set('file', file);
+
+      const response = await fetch('/api/prospects/import', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data: {
+        error?: string;
+        filename?: string;
+        importedRowCount?: number;
+        success?: boolean;
+      } = await response.json();
+
+      if (!response.ok || !data.success || !data.filename) {
+        throw new Error(data.error || "L'import du CSV a échoué.");
+      }
+
+      await refreshFiles();
+      setActiveFilename(data.filename);
+      alert(`CSV importé avec succès dans le stockage de l'application (${data.importedRowCount ?? 0} lignes).`);
+    } catch (error) {
+      console.error('Failed to import prospects', error);
+      alert(error instanceof Error ? error.message : "Erreur lors de l'import du CSV");
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -426,6 +504,41 @@ export default function App() {
     }
 
     setActiveFilename(nextValue);
+  };
+
+  const deleteActiveFile = async () => {
+    if (!confirm(`Supprimer définitivement la liste "${activeFilename}" ?`)) {
+      return;
+    }
+
+    setIsDeleting(true);
+
+    try {
+      const response = await fetch('/api/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', filename: activeFilename }),
+      });
+
+      const data: {
+        success?: boolean;
+        error?: string;
+        files?: string[];
+        fallbackFilename?: string | null;
+      } = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Erreur lors de la suppression');
+      }
+
+      const nextFiles = data.files ?? [];
+      setFiles(nextFiles);
+      setActiveFilename(data.fallbackFilename ?? nextFiles[0] ?? 'prospects.csv');
+    } catch (error) {
+      console.error('Failed to delete file', error);
+      alert(error instanceof Error ? error.message : 'Erreur lors de la suppression');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const insertVariable = (variable: string) => {
@@ -686,24 +799,42 @@ export default function App() {
             <div className="card" style={{ width: '100%' }}>
               <div className="card-header">
                 <h2><Users className="w-5 h-5 text-primary" /> Audience (CSV)</h2>
-                <select
-                  className="btn-secondary"
-                  value={activeFilename}
-                  onChange={handleFileChange}
-                  style={{ maxWidth: '200px', padding: '0.4rem 0.8rem', borderRadius: '6px' }}
-                >
-                  {files.map((file) => (
-                    <option key={file} value={file}>{file}</option>
-                  ))}
-                  <option value="CREATE_NEW" style={{ fontWeight: 'bold' }}>+ Créer un nouveau...</option>
-                </select>
+                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  <select
+                    className="btn-secondary"
+                    value={activeFilename}
+                    onChange={handleFileChange}
+                    style={{ maxWidth: '200px', padding: '0.4rem 0.8rem', borderRadius: '6px' }}
+                  >
+                    {files.map((file) => (
+                      <option key={file} value={file}>{file}</option>
+                    ))}
+                    <option value="CREATE_NEW" style={{ fontWeight: 'bold' }}>+ Créer un nouveau...</option>
+                  </select>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    style={{ display: 'none' }}
+                    onChange={importProspects}
+                  />
+                </div>
               </div>
-              <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '-0.5rem', marginBottom: '0.5rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '-0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+                <button className="btn-secondary" onClick={triggerImport} disabled={isImporting || isDeleting}>
+                  <Upload className="w-4 h-4" /> {isImporting ? 'Import...' : 'Importer CSV'}
+                </button>
+                <button className="btn-secondary" onClick={() => void exportProspects()} disabled={isSaving || isImporting || isDeleting}>
+                  <Download className="w-4 h-4" /> Exporter CSV
+                </button>
                 <button className="btn-secondary" onClick={addColumn}>
                   <Plus className="w-4 h-4" /> Colonne
                 </button>
-                <button className="btn-secondary" onClick={saveProspects} disabled={isSaving}>
+                <button className="btn-secondary" onClick={() => void saveProspects()} disabled={isSaving || isImporting || isDeleting}>
                   <Save className="w-4 h-4" /> {isSaving ? '...' : 'Save'}
+                </button>
+                <button className="btn-danger" onClick={() => void deleteActiveFile()} disabled={isSaving || isImporting || isDeleting || isLoading}>
+                  <Trash2 className="w-4 h-4" /> {isDeleting ? 'Suppression...' : 'Supprimer la liste'}
                 </button>
               </div>
 
